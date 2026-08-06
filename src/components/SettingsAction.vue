@@ -2,11 +2,12 @@
 import { mdiCog } from '@mdi/js';
 import { ref } from 'vue';
 import { open } from '@tauri-apps/plugin-dialog';
+import useTauriStore from '../composables/useTauriStore.ts';
 
 const showDialog = ref(false);
 
-const sourcePath = ref('');
-const destinationPath = ref('');
+const sourcePath = useTauriStore('sourcePath', '');
+const destinationPath = useTauriStore('destinationPath', '');
 
 async function pickFolder(): Promise<string> {
   const folderPath = await open({
