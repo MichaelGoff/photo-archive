@@ -1,6 +1,7 @@
 import { createApp } from 'vue';
 import App from './App.vue';
 import { createVuetify } from 'vuetify';
+import { createPinia } from 'pinia';
 import 'unfonts.css';
 import 'vuetify/styles';
 import { aliases, mdi } from 'vuetify/iconsets/mdi-svg';
@@ -15,4 +16,6 @@ const vuetify = createVuetify({
   },
 });
 
-createApp(App).use(vuetify).mount('#app');
+const pinia = createPinia();
+
+createApp(App).use(vuetify).use(pinia).mount('#app');

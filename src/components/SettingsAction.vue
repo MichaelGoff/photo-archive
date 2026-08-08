@@ -1,30 +1,39 @@
 <script setup lang="ts">
 import { mdiCog } from '@mdi/js';
 import { ref } from 'vue';
-import { open } from '@tauri-apps/plugin-dialog';
 import useTauriStore from '../composables/useTauriStore.ts';
+import { SOURCE_PATH, DESTINATION_PATH } from '../lib/storeKeys.ts';
+import { invoke } from '@tauri-apps/api/core';
+import { useErrorStore } from '../stores/useErrorStore.ts';
 
 const showDialog = ref(false);
 
-const sourcePath = useTauriStore('sourcePath', '');
-const destinationPath = useTauriStore('destinationPath', '');
+const errorStore = useErrorStore();
+const sourcePath = useTauriStore(SOURCE_PATH, '');
+const destinationPath = useTauriStore(DESTINATION_PATH, '');
 
 async function pickFolder(): Promise<string> {
-  const folderPath = await open({
-    directory: true,
-    multiple: false,
-    title: 'Select folder',
-  });
-
-  return folderPath ?? '';
+  try {
+    const folderPath = await invoke<string>('select_and_allow_directory');
+    return folderPath ?? '';
+  } catch (error) {
+    errorStore.setError(error);
+    return '';
+  }
 }
 
 async function onSourceBrowse() {
-  sourcePath.value = await pickFolder();
+  const folder = await pickFolder();
+  if (folder) {
+    sourcePath.value = folder;
+  }
 }
 
 async function onDestinationBrowse() {
-  destinationPath.value = await pickFolder();
+  const folder = await pickFolder();
+  if (folder) {
+    destinationPath.value = folder;
+  }
 }
 </script>
 
@@ -76,13 +85,8 @@ async function onDestinationBrowse() {
           <v-spacer />
           <v-btn
             variant="text"
-            text="Cancel"
+            text="Close"
             @click="showDialog = false"
-          />
-          <v-btn
-            color="primary"
-            type="submit"
-            text="Save"
           />
         </v-card-actions>
       </v-card>
