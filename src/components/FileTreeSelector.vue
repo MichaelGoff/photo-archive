@@ -5,6 +5,12 @@ import { ref, watch } from 'vue';
 import { DirEntry, readDir } from '@tauri-apps/plugin-fs';
 import { useErrorStore } from '../stores/useErrorStore.ts';
 import { join } from '@tauri-apps/api/path';
+import { mdiFolder, mdiFolderOpen } from '@mdi/js';
+
+const activePath = defineModel({
+  type: String,
+  required: true,
+});
 
 const sourcePath = useTauriStore(SOURCE_PATH, '');
 const directories = ref<DirEntry[]>([]);
@@ -55,7 +61,23 @@ type TreeItem = {
   children?: TreeItem[];
 };
 
+const openedItems = ref<string[]>([]);
+const activeIds = ref<string[]>([]);
 const items = ref<TreeItem[]>([]);
+
+watch(activeIds, (val) => {
+  if (val.length) {
+    activePath.value = val[0];
+  } else {
+    activePath.value = '';
+  }
+});
+
+watch(activePath, (val) => {
+  if (val && activeIds.value?.[0] !== val) {
+    activeIds.value = [val];
+  }
+});
 
 async function loadChildren(item: unknown): Promise<void> {
   // I know it is a tree item. It's coming in from my items list.
@@ -68,9 +90,17 @@ async function loadChildren(item: unknown): Promise<void> {
 
 <template>
   <v-treeview
+    v-model:opened="openedItems"
+    v-model:activated="activeIds"
     :items="items"
+    item-value="id"
     :load-children="loadChildren"
+    activatable
+    density="compact"
   >
+    <template #prepend="{ item, isOpen }">
+      <v-icon :icon="isOpen && item.children?.length ? mdiFolderOpen : mdiFolder" />
+    </template>
   </v-treeview>
 </template>
 

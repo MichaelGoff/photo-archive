@@ -1,12 +1,13 @@
 <script setup lang="ts">
-//import { invoke } from '@tauri-apps/api/core';
+import { invoke } from '@tauri-apps/api/core';
 import SettingsAction from './components/SettingsAction.vue';
-import { SOURCE_PATH } from './lib/storeKeys.ts';
+import { SOURCE_PATH, DESTINATION_PATH } from './lib/storeKeys.ts';
 import { DirEntry, readDir } from '@tauri-apps/plugin-fs';
 import { ref, watch } from 'vue';
 import useTauriStore from './composables/useTauriStore.ts';
 import { useErrorStore } from './stores/useErrorStore.ts';
 import FileTreeSelector from './components/FileTreeSelector.vue';
+import { listen } from '@tauri-apps/api/event';
 
 // async function greet() {
 //   // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
@@ -14,8 +15,12 @@ import FileTreeSelector from './components/FileTreeSelector.vue';
 // }
 
 const sourcePath = useTauriStore(SOURCE_PATH, '');
+const destinationPath = useTauriStore(DESTINATION_PATH, '');
 const directories = ref<DirEntry[]>([]);
 const errorStore = useErrorStore();
+
+const selectedPath = ref<string>('');
+const archiveLoading = ref<boolean>(false);
 
 async function loadFiles() {
   if (sourcePath.value) {
@@ -26,6 +31,38 @@ async function loadFiles() {
     } catch (error) {
       errorStore.setError(error);
     }
+  }
+}
+
+type CopyProgress = {
+  total_files: number;
+  copied_files: number;
+  current_file: string;
+};
+
+const totalFiles = ref<number>(0);
+const copiedFiles = ref<number>(0);
+const currentFile = ref<string>('');
+
+async function onArchive() {
+  let unlisten: Awaited<ReturnType<typeof listen>> = () => {};
+  try {
+    archiveLoading.value = true;
+    unlisten = await listen<CopyProgress>('copy-progress', (event) => {
+      totalFiles.value = event.payload.total_files;
+      copiedFiles.value = event.payload.copied_files;
+      currentFile.value = event.payload.current_file;
+    });
+
+    await invoke('copy_folder_with_progress', {
+      source: selectedPath.value,
+      destination: destinationPath.value,
+    });
+  } catch (error) {
+    errorStore.setError(error);
+  } finally {
+    archiveLoading.value = false;
+    unlisten();
   }
 }
 
@@ -71,11 +108,36 @@ loadFiles();
         >
           No source folder...
         </v-card-text>
-        <file-tree-selector v-else />
+        <file-tree-selector
+          v-else
+          v-model="selectedPath"
+        />
       </v-card>
+      <div
+        v-if="archiveLoading"
+        class="mx-4 mt-2"
+      >
+        <div class="font-italic mb-1">Archiving {{ selectedPath }}</div>
+        <v-progress-linear
+          :model-value="copiedFiles"
+          :max="totalFiles"
+        />
+        <span class="text-body-medium">{{ currentFile }}</span>
+      </div>
       <div class="d-flex ma-4">
+        <span
+          v-if="selectedPath"
+          class="border rounded py-1 px-2"
+          >{{ selectedPath }}</span
+        >
         <v-spacer />
-        <v-btn text="Archive"></v-btn>
+        <v-btn
+          text="Archive"
+          color="primary"
+          :disabled="!selectedPath"
+          :loading="archiveLoading"
+          @click="onArchive"
+        ></v-btn>
       </div>
     </v-main>
   </v-app>
