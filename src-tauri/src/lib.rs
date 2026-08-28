@@ -1,10 +1,12 @@
 use tauri_plugin_fs::FsExt;
 use tauri_plugin_dialog::DialogExt;
 use std::path::Path;
+use std::path::PathBuf;
 use std::fs;
 use walkdir::WalkDir;
 use serde::Serialize;
 use tauri::{Emitter};
+use tauri_plugin_store::StoreExt;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
@@ -52,19 +54,43 @@ struct CopyProgress {
 }
 
 #[tauri::command]
-async fn copy_folder_with_progress(app: tauri::AppHandle, source: String, destination: String) -> Result<(), String> {
-    let src_path = Path::new(&source);
-    let dest_path = Path::new(&destination);
+async fn copy_folder_with_progress(app: tauri::AppHandle, folder_path_raw: String) -> Result<(), String> {
+    let folder_path = Path::new(&folder_path_raw);
 
-    if !src_path.exists() {
-        return Err("Source path does not exist".to_string());
+    if !folder_path.exists() {
+        return Err("Folder path does not exist".to_string());
     }
 
-    if !dest_path.exists() {
-        fs::create_dir_all(dest_path).map_err(|e| e.to_string())?;
+    // Pull the source and destination paths from the store
+    let store = app
+        .store("settings.json")
+        .map_err(|e| format!("Failed to access store: {}", e))?;
+
+    let source_path: PathBuf = store
+        .get("sourcePath")
+        .and_then(|val| val.as_str().map(PathBuf::from))
+        .ok_or_else(|| "sourcePath missing or not a string".to_string())?;
+
+    let dest_path: PathBuf = store
+        .get("destinationPath")
+        .and_then(|val| val.as_str().map(PathBuf::from))
+        .ok_or_else(|| "destinationPath missing or not a string".to_string())?;
+
+    // The folderPath is inside the sourcePath, so we need to calculate the relative path
+    // from sourcePath to folderPath. This will allow us to maintain the same folder structure
+    // in the destinationPath
+    let rel_source_folder_path = folder_path
+        .strip_prefix(&source_path)
+        .map_err(|_| format!("folderPath {:?} is not inside sourcePath {:?}", folder_path, source_path))?;
+
+    // Now re-build that path in our destination
+    let target_root = dest_path.join(rel_source_folder_path);
+
+    if !target_root.exists() {
+        fs::create_dir_all(&target_root).map_err(|e| e.to_string())?;
     }
 
-    let total_files = WalkDir::new(src_path)
+    let total_files = WalkDir::new(folder_path)
         .into_iter()
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
@@ -72,29 +98,27 @@ async fn copy_folder_with_progress(app: tauri::AppHandle, source: String, destin
 
     let mut copied_files = 0;
 
-    for entry in WalkDir::new(src_path).into_iter().filter_map(|e| e.ok()) {
+    for entry in WalkDir::new(folder_path).into_iter().filter_map(|e| e.ok()) {
         let path = entry.path();
 
         // Calculate where the file/folder should go in the destination
-        let relative_path = path.strip_prefix(src_path).map_err(|e| e.to_string())?;
-        let target_path = dest_path.join(relative_path);
+        let relative_path = path.strip_prefix(folder_path).map_err(|e| e.to_string())?;
+        let target_path = target_root.join(relative_path);
 
         if entry.file_type().is_dir() {
             // Create directories as we encounter them
             fs::create_dir_all(&target_path).map_err(|e| e.to_string())?;
         } else if entry.file_type().is_file() {
-            // Copy the file
             fs::copy(path, &target_path).map_err(|e| e.to_string())?;
             copied_files += 1;
 
-            // Step 3: Emit the progress state back to the frontend
+            // Emit the progress state back to the frontend
             let payload = CopyProgress {
                 total_files,
                 copied_files,
                 current_file: entry.file_name().to_string_lossy().into_owned(),
             };
 
-            // "copy-progress" is the event name the frontend will listen for
             app.emit("copy-progress", payload).map_err(|e| e.to_string())?;
         }
     }

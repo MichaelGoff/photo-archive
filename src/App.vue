@@ -55,8 +55,7 @@ async function onArchive() {
     });
 
     await invoke('copy_folder_with_progress', {
-      source: selectedPath.value,
-      destination: destinationPath.value,
+      folderPathRaw: selectedPath.value,
     });
   } catch (error) {
     errorStore.setError(error);
@@ -89,6 +88,12 @@ loadFiles();
       </template>
     </v-app-bar>
     <v-main class="d-flex flex-column">
+      <div
+        class="text-body-medium mx-4 mt-4"
+        v-if="!destinationPath && selectedPath"
+      >
+        No destination folder configured...
+      </div>
       <v-alert
         v-if="errorStore.errorMessage"
         type="error"
@@ -134,7 +139,7 @@ loadFiles();
         <v-btn
           text="Archive"
           color="primary"
-          :disabled="!selectedPath"
+          :disabled="!selectedPath || !destinationPath"
           :loading="archiveLoading"
           @click="onArchive"
         ></v-btn>
