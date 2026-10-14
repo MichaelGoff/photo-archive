@@ -53,8 +53,88 @@ struct CopyProgress {
     current_file: String,
 }
 
+#[derive(Clone, Debug, Serialize)]
+struct ValidationReport {
+    total_files: usize,
+    verified_files: usize,
+    missing_files: Vec<String>,
+    size_mismatches: Vec<String>,
+    modified_time_mismatches: Vec<String>,
+}
+
+fn validate_copy(source_root: &Path, target_root: &Path) -> ValidationReport {
+    let mut total_files = 0;
+    let mut verified_files = 0;
+    let mut missing_files: Vec<String> = Vec::new();
+    let mut size_mismatches: Vec<String> = Vec::new();
+    let mut modified_time_mismatches: Vec<String> = Vec::new();
+
+    for entry in WalkDir::new(source_root).into_iter().filter_map(|e| e.ok()) {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        total_files += 1;
+
+        let relative_path = match entry.path().strip_prefix(source_root) {
+            Ok(relative_path) => relative_path,
+            Err(_) => continue,
+        };
+        let relative_path_string = relative_path.to_string_lossy().to_string();
+        let destination_file = target_root.join(relative_path);
+
+        let destination_meta = match fs::metadata(&destination_file) {
+            Ok(destination_meta) => destination_meta,
+            Err(_) => {
+                missing_files.push(relative_path_string);
+                continue;
+            }
+        };
+
+        let source_meta = match entry.metadata() {
+            Ok(source_meta) => source_meta,
+            Err(_) => {
+                missing_files.push(relative_path_string);
+                continue;
+            }
+        };
+
+        if source_meta.len() != destination_meta.len() {
+            size_mismatches.push(relative_path_string);
+            continue;
+        }
+
+        // Soft check: some filesystems don't support modified-time queries, so skip the
+        // comparison if either side is unavailable rather than reporting a false mismatch.
+        match (source_meta.modified().ok(), destination_meta.modified().ok()) {
+            (Some(source_modified), Some(destination_modified))
+                if source_modified == destination_modified =>
+            {
+                verified_files += 1;
+            }
+            (Some(_), Some(_)) => {
+                modified_time_mismatches.push(relative_path_string);
+            }
+            _ => {
+                // Timestamps unavailable on one side; verified as far as we can tell
+                verified_files += 1;
+            }
+        }
+    }
+
+    ValidationReport {
+        total_files,
+        verified_files,
+        missing_files,
+        size_mismatches,
+        modified_time_mismatches,
+    }
+}
+
 #[tauri::command]
-async fn copy_folder_with_progress(app: tauri::AppHandle, folder_path_raw: String) -> Result<(), String> {
+async fn copy_folder_with_progress(
+    app: tauri::AppHandle,
+    folder_path_raw: String,
+) -> Result<ValidationReport, String> {
     let folder_path = Path::new(&folder_path_raw);
 
     if !folder_path.exists() {
@@ -123,7 +203,8 @@ async fn copy_folder_with_progress(app: tauri::AppHandle, folder_path_raw: Strin
         }
     }
 
-    Ok(())
+    // After copying, verify that every source file exists in the destination with a matching size
+    Ok(validate_copy(folder_path, &target_root))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -137,4 +218,62 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![greet, select_and_allow_directory, copy_folder_with_progress])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_copy_detects_missing_and_truncated_files() {
+        let base = std::env::temp_dir().join(format!(
+            "photo_archive_validate_test_{}",
+            std::process::id()
+        ));
+        let source = base.join("source");
+        let destination = base.join("destination");
+
+        // Clean up from any previous failed run, then build a small source tree
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(destination.join("sub")).unwrap();
+        std::fs::write(source.join("a.txt"), b"hello").unwrap();
+        std::fs::write(source.join("b.txt"), b"world!").unwrap();
+        std::fs::write(source.join("sub/c.txt"), b"nested").unwrap();
+
+        // Copy everything, as the real command would (fs::copy preserves mtimes)
+        for entry in WalkDir::new(&source).into_iter().filter_map(|e| e.ok()) {
+            let relative_path = entry.path().strip_prefix(&source).unwrap();
+            let target_path = destination.join(relative_path);
+            if entry.file_type().is_dir() {
+                std::fs::create_dir_all(&target_path).unwrap();
+            } else {
+                std::fs::copy(entry.path(), &target_path).unwrap();
+            }
+        }
+
+        // Perfect state: everything verified
+        let report = validate_copy(&source, &destination);
+        assert_eq!(report.total_files, 3);
+        assert_eq!(report.verified_files, 3);
+        assert!(report.missing_files.is_empty());
+        assert!(report.size_mismatches.is_empty());
+        assert!(report.modified_time_mismatches.is_empty());
+
+        // Break one file (truncation) and remove another
+        std::fs::write(destination.join("b.txt"), b"wo").unwrap();
+        std::fs::remove_file(destination.join("sub/c.txt")).unwrap();
+
+        let report = validate_copy(&source, &destination);
+        assert_eq!(report.total_files, 3);
+        assert_eq!(report.verified_files, 1);
+        // Compare paths component-wise so this works regardless of '/' vs '\' separators
+        let missing: Vec<PathBuf> = report.missing_files.iter().map(PathBuf::from).collect();
+        let size_mismatches: Vec<PathBuf> = report.size_mismatches.iter().map(PathBuf::from).collect();
+        assert_eq!(missing, vec![PathBuf::from("sub").join("c.txt")]);
+        assert_eq!(size_mismatches, vec![PathBuf::from("b.txt")]);
+
+        // Tidy up
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }

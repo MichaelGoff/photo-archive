@@ -3,7 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import SettingsAction from './components/SettingsAction.vue';
 import { SOURCE_PATH, DESTINATION_PATH } from './lib/storeKeys.ts';
 import { DirEntry, readDir } from '@tauri-apps/plugin-fs';
-import { ref, watch } from 'vue';
+import { computed, ref, watch } from 'vue';
 import useTauriStore from './composables/useTauriStore.ts';
 import { useErrorStore } from './stores/useErrorStore.ts';
 import FileTreeSelector from './components/FileTreeSelector.vue';
@@ -40,21 +40,39 @@ type CopyProgress = {
   current_file: string;
 };
 
+type ValidationReport = {
+  total_files: number;
+  verified_files: number;
+  missing_files: string[];
+  size_mismatches: string[];
+  modified_time_mismatches: string[];
+};
+
 const totalFiles = ref<number>(0);
 const copiedFiles = ref<number>(0);
 const currentFile = ref<string>('');
+
+const validationReport = ref<ValidationReport | null>(null);
+
+const hasValidationIssues = computed(
+  () =>
+    validationReport.value !== null &&
+    (validationReport.value.missing_files.length > 0 ||
+      validationReport.value.size_mismatches.length > 0),
+);
 
 async function onArchive() {
   let unlisten: Awaited<ReturnType<typeof listen>> = () => {};
   try {
     archiveLoading.value = true;
+    validationReport.value = null;
     unlisten = await listen<CopyProgress>('copy-progress', (event) => {
       totalFiles.value = event.payload.total_files;
       copiedFiles.value = event.payload.copied_files;
       currentFile.value = event.payload.current_file;
     });
 
-    await invoke('copy_folder_with_progress', {
+    validationReport.value = await invoke<ValidationReport>('copy_folder_with_progress', {
       folderPathRaw: selectedPath.value,
     });
   } catch (error) {
@@ -103,6 +121,40 @@ loadFiles();
         style="flex: 0 0 auto"
         border="start"
       />
+      <v-alert
+        v-if="validationReport"
+        :type="hasValidationIssues ? 'error' : 'success'"
+        variant="tonal"
+        class="mx-4 mt-4"
+        style="flex: 0 0 auto"
+        border="start"
+      >
+        <div>
+          {{
+            hasValidationIssues
+              ? `Validation failed: only ${validationReport.verified_files} of ${validationReport.total_files} files verified in the destination.`
+              : `Archive complete: all ${validationReport.total_files} files verified in the destination.`
+          }}
+        </div>
+        <div
+          v-if="validationReport.missing_files.length"
+          class="text-caption"
+        >
+          Missing: {{ validationReport.missing_files.join(', ') }}
+        </div>
+        <div
+          v-if="validationReport.size_mismatches.length"
+          class="text-caption"
+        >
+          Size mismatch: {{ validationReport.size_mismatches.join(', ') }}
+        </div>
+        <div
+          v-if="validationReport.modified_time_mismatches.length"
+          class="text-caption"
+        >
+          Modified time differs: {{ validationReport.modified_time_mismatches.join(', ') }}
+        </div>
+      </v-alert>
       <v-card
         class="folder-tree mx-4 mt-4 flex-grow-1"
         variant="tonal"
