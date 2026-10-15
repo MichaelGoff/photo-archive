@@ -3,7 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import SettingsAction from './components/SettingsAction.vue';
 import { SOURCE_PATH, DESTINATION_PATH } from './lib/storeKeys.ts';
 import { DirEntry, readDir } from '@tauri-apps/plugin-fs';
-import { ref, watch } from 'vue';
+import { computed, ref, watch } from 'vue';
 import useTauriStore from './composables/useTauriStore.ts';
 import { useErrorStore } from './stores/useErrorStore.ts';
 import FileTreeSelector from './components/FileTreeSelector.vue';
@@ -34,27 +34,54 @@ async function loadFiles() {
   }
 }
 
-type CopyProgress = {
+type ValidationReport = {
   total_files: number;
-  copied_files: number;
+  verified_files: number;
+  missing_files: string[];
+  size_mismatches: string[];
+  modified_time_mismatches: string[];
+};
+
+type OperationProgress = {
+  stage: number; // 0 = Copy, 1 = Validate, 2 = Delete
+  total_files: number;
+  processed_files: number;
   current_file: string;
+  overall_progress: number;
 };
 
 const totalFiles = ref<number>(0);
-const copiedFiles = ref<number>(0);
+const processedFiles = ref<number>(0);
 const currentFile = ref<string>('');
+const operationStage = ref<number>(0); // 0 = Copy, 1 = Validate, 2 = Delete
+const overallProgress = ref<number>(0);
+
+const validationReport = ref<ValidationReport | null>(null);
+
+const hasValidationIssues = computed(
+  () =>
+    validationReport.value !== null &&
+    (validationReport.value.missing_files.length > 0 ||
+      validationReport.value.size_mismatches.length > 0),
+);
 
 async function onArchive() {
   let unlisten: Awaited<ReturnType<typeof listen>> = () => {};
   try {
     archiveLoading.value = true;
-    unlisten = await listen<CopyProgress>('copy-progress', (event) => {
+    validationReport.value = null;
+    unlisten = await listen<OperationProgress>('operation-progress', (event) => {
       totalFiles.value = event.payload.total_files;
-      copiedFiles.value = event.payload.copied_files;
+      processedFiles.value = event.payload.processed_files;
       currentFile.value = event.payload.current_file;
+      operationStage.value = event.payload.stage;
+      overallProgress.value = event.payload.overall_progress * 100; // Convert to percentage
+      console.log(
+        `Stage: ${operationStage.value}, Processed: ${processedFiles.value}/${totalFiles.value}, Overall Progress: ${overallProgress.value}%`,
+      );
     });
 
-    await invoke('copy_folder_with_progress', {
+    validationReport.value = await invoke<ValidationReport>('copy_folder_with_progress', {
       folderPathRaw: selectedPath.value,
     });
   } catch (error) {
@@ -103,6 +130,40 @@ loadFiles();
         style="flex: 0 0 auto"
         border="start"
       />
+      <v-alert
+        v-if="validationReport"
+        :type="hasValidationIssues ? 'error' : 'success'"
+        variant="tonal"
+        class="mx-4 mt-4"
+        style="flex: 0 0 auto"
+        border="start"
+      >
+        <div>
+          {{
+            hasValidationIssues
+              ? `Validation failed: only ${validationReport.verified_files} of ${validationReport.total_files} files verified in the destination.`
+              : `Archive complete: all ${validationReport.total_files} files verified in the destination.`
+          }}
+        </div>
+        <div
+          v-if="validationReport.missing_files.length"
+          class="text-caption"
+        >
+          Missing: {{ validationReport.missing_files.join(', ') }}
+        </div>
+        <div
+          v-if="validationReport.size_mismatches.length"
+          class="text-caption"
+        >
+          Size mismatch: {{ validationReport.size_mismatches.join(', ') }}
+        </div>
+        <div
+          v-if="validationReport.modified_time_mismatches.length"
+          class="text-caption"
+        >
+          Modified time differs: {{ validationReport.modified_time_mismatches.join(', ') }}
+        </div>
+      </v-alert>
       <v-card
         class="folder-tree mx-4 mt-4 flex-grow-1"
         variant="tonal"
@@ -123,10 +184,24 @@ loadFiles();
         class="mx-4 mt-2"
       >
         <div class="font-italic mb-1">Archiving {{ selectedPath }}</div>
+        <!-- Overall operation progress -->
         <v-progress-linear
-          :model-value="copiedFiles"
-          :max="totalFiles"
+          :model-value="overallProgress"
+          :max="100"
+          class="mb-2"
+          :color="operationStage === 0 ? 'blue' : operationStage === 1 ? 'green' : 'red'"
         />
+        <!-- Stage-specific progress -->
+        <v-progress-linear
+          :model-value="processedFiles"
+          :max="totalFiles"
+          class="mb-1"
+        />
+        <!-- Stage indicator and current file -->
+        <div class="text-body-medium">
+          Stage:
+          {{ operationStage === 0 ? 'Copying' : operationStage === 1 ? 'Validating' : 'Deleting' }}
+        </div>
         <span class="text-body-medium">{{ currentFile }}</span>
       </div>
       <div class="d-flex ma-4">
