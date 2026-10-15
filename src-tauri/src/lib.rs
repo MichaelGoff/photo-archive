@@ -3,7 +3,6 @@ use tauri_plugin_dialog::DialogExt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::fs;
-use std::io;
 use walkdir::WalkDir;
 use serde::Serialize;
 use tauri::{Emitter};
@@ -75,19 +74,30 @@ fn calculate_file_checksum(path: &Path) -> Result<String, Box<dyn std::error::Er
     Ok(format!("{:x}", result))
 }
 
-fn validate_copy(source_root: &Path, target_root: &Path) -> ValidationReport {
-    let mut total_files = 0;
+fn count_files(source_root: &Path) -> usize {
+    WalkDir::new(source_root)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .count()
+}
+
+fn validate_copy_with_progress(source_root: &Path, target_root: &Path, app: &tauri::AppHandle) -> ValidationReport {
+    // First count total files to get deterministic progress
+    let total_files = count_files(source_root);
+
     let mut verified_files = 0;
     let mut missing_files: Vec<String> = Vec::new();
     let mut size_mismatches: Vec<String> = Vec::new();
     let mut modified_time_mismatches: Vec<String> = Vec::new();
     let mut checksum_mismatches: Vec<String> = Vec::new();
 
+    let mut processed_files = 0;
     for entry in WalkDir::new(source_root).into_iter().filter_map(|e| e.ok()) {
         if !entry.file_type().is_file() {
             continue;
         }
-        total_files += 1;
+        processed_files += 1;
 
         let relative_path = match entry.path().strip_prefix(source_root) {
             Ok(relative_path) => relative_path,
@@ -99,7 +109,7 @@ fn validate_copy(source_root: &Path, target_root: &Path) -> ValidationReport {
         let destination_meta = match fs::metadata(&destination_file) {
             Ok(destination_meta) => destination_meta,
             Err(_) => {
-                missing_files.push(relative_path_string);
+                missing_files.push(relative_path_string.clone());
                 continue;
             }
         };
@@ -107,13 +117,13 @@ fn validate_copy(source_root: &Path, target_root: &Path) -> ValidationReport {
         let source_meta = match entry.metadata() {
             Ok(source_meta) => source_meta,
             Err(_) => {
-                missing_files.push(relative_path_string);
+                missing_files.push(relative_path_string.clone());
                 continue;
             }
         };
 
         if source_meta.len() != destination_meta.len() {
-            size_mismatches.push(relative_path_string);
+            size_mismatches.push(relative_path_string.clone());
             continue;
         }
 
@@ -131,13 +141,13 @@ fn validate_copy(source_root: &Path, target_root: &Path) -> ValidationReport {
             Ok(checksum) => checksum,
             Err(_) => {
                 // If we can't calculate checksum, treat as mismatch
-                checksum_mismatches.push(relative_path_string);
+                checksum_mismatches.push(relative_path_string.clone());
                 continue;
             }
         };
 
         if source_checksum != destination_checksum {
-            checksum_mismatches.push(relative_path_string);
+            checksum_mismatches.push(relative_path_string.clone());
             continue;
         }
 
@@ -150,13 +160,24 @@ fn validate_copy(source_root: &Path, target_root: &Path) -> ValidationReport {
                 verified_files += 1;
             }
             (Some(_), Some(_)) => {
-                modified_time_mismatches.push(relative_path_string);
+                modified_time_mismatches.push(relative_path_string.clone());
             }
             _ => {
                 // Timestamps unavailable on one side; verified as far as we can tell
                 verified_files += 1;
             }
         }
+
+        // Emit validation progress for each file processed
+        let payload = OperationProgress {
+            stage: 1,
+            total_files,
+            processed_files,
+            current_file: relative_path_string.clone(),
+            overall_progress: 0.5 + (processed_files as f64 / total_files as f64) * 0.3, // 50-80% progress
+        };
+
+        app.emit("operation-progress", payload).map_err(|e| e.to_string()).unwrap();
     }
 
     ValidationReport {
@@ -246,23 +267,7 @@ async fn copy_folder_with_progress(
     }
 
     // Stage 2: Validation with progress tracking - 30% of total progress
-    let validation_report = validate_copy(folder_path, &target_root);
-    
-    // Emit validation progress (stage 1) - 50-80% of total progress
-    let mut validated_files = 0;
-    for _ in 0..validation_report.total_files {
-        validated_files += 1;
-        
-        let payload = OperationProgress {
-            stage: 1,
-            total_files: validation_report.total_files,
-            processed_files: validated_files,
-            current_file: "Validating...".to_string(),
-            overall_progress: 0.5 + (validated_files as f64 / validation_report.total_files as f64) * 0.3, // 50-80% progress
-        };
-
-        app.emit("operation-progress", payload).map_err(|e| e.to_string())?;
-    }
+    let validation_report = validate_copy_with_progress(folder_path, &target_root, &app);
 
     // Stage 3: Delete from source with progress tracking - 20% of total progress  
     let mut deleted_files = 0;

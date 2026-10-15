@@ -76,6 +76,9 @@ async function onArchive() {
       currentFile.value = event.payload.current_file;
       operationStage.value = event.payload.stage;
       overallProgress.value = event.payload.overall_progress * 100; // Convert to percentage
+      console.log(
+        `Stage: ${operationStage.value}, Processed: ${processedFiles.value}/${totalFiles.value}, Overall Progress: ${overallProgress.value}%`,
+      );
     });
 
     validationReport.value = await invoke<ValidationReport>('copy_folder_with_progress', {
